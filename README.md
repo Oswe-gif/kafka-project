@@ -1,147 +1,147 @@
-# Kafka: Producer, Tracker, particiones y reintentos
+# Kafka: Producer, Tracker, Partitions, and Retries
 
-Proyecto de ejemplo con Spring Boot y Kafka. El **producer** recibe pedidos y publica eventos; el **tracker** los consume, los procesa y, si fallan, aplica reintentos antes de enviarlos a una cola de errores.
+This Spring Boot and Kafka example has a **producer** that receives and publishes order events, and a **tracker** that consumes and processes them. Failed events are retried before being sent to an error queue.
 
-## Arquitectura
+## Architecture
 
-![Diagrama del flujo de pedidos, reintentos y cola de errores](docs/architecture.svg)
+![Order, retry, and error-queue flow diagram](docs/architecture.svg)
 
-1. Un cliente envía un pedido al **producer** en el puerto `8081` mediante `POST /api/messages`.
-2. El producer publica un `OrderCreatedEvent` JSON en el tópico `orders` de Kafka. Usa `orderId` como clave del mensaje.
-3. El **tracker**, disponible en el puerto `8082`, consume `orders` con el grupo `group-1` y ejecuta la lógica de negocio.
-4. Si el pedido se procesa correctamente, termina el flujo. Si falla, pasa por los tópicos de reintento y, después del último intento, por `orders.dlt`.
+1. A client sends an order to the **producer** on port `8081` through `POST /api/messages`.
+2. The producer publishes an `OrderCreatedEvent` as JSON to the Kafka `orders` topic, using `orderId` as the message key.
+3. The **tracker**, available on port `8082`, consumes `orders` as part of the `group-1` consumer group and runs the business logic.
+4. A successfully processed order completes the flow. A failed order moves through retry topics and finally to `orders.dlt`.
 
-## Levantar el entorno
+## Start the environment
 
-### Requisitos
+### Prerequisites
 
-- Docker Desktop (o Docker Engine con Docker Compose)
+- Docker Desktop (or Docker Engine with Docker Compose)
 - Java 21
 
-Desde la raíz del repositorio, levanta Kafka:
+From the repository root, start Kafka:
 
 ```powershell
 docker compose up -d
 docker compose ps
 ```
 
-Kafka queda expuesto en `localhost:9092`. Después, levanta localmente los dos servicios Spring Boot: **tracker** queda disponible en el puerto `8082` y **producer** en el puerto `8081`.
+Kafka is exposed at `localhost:9092`. Then start both Spring Boot services locally: **tracker** listens on port `8082` and **producer** on port `8081`.
 
-Para detener Kafka:
+To stop Kafka:
 
 ```powershell
 docker compose down
 ```
 
-> El comando anterior conserva el volumen de Kafka. Usa `docker compose down -v` solo si también quieres eliminar los mensajes persistidos.
+> This command preserves the Kafka volume. Use `docker compose down -v` only when you also want to remove persisted messages.
 
-## Tópico `orders`: particiones, no réplicas
+## `orders` topic: partitions, not replicas
 
-Para la demostración se aumentó **manualmente** el tópico `orders` a tres particiones, únicamente para observar cómo Kafka distribuye los eventos según su clave:
+For the demonstration, the `orders` topic was **manually** expanded to three partitions only to observe how Kafka distributes events by key:
 
 ```powershell
 docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --alter --topic orders --partitions 3
 ```
 
-Esto **no** agrega réplicas de los datos. La evidencia del tópico muestra `PartitionCount: 3`, pero también `ReplicationFactor: 1`, `Replicas: 1` e `Isr: 1` en cada partición. Hay un único broker, por lo que cada partición existe una sola vez: no hay tolerancia a la caída de un broker.
+This does **not** add data replicas. The topic details show `PartitionCount: 3`, but also `ReplicationFactor: 1`, `Replicas: 1`, and `Isr: 1` for every partition. There is a single broker, so each partition has one copy and there is no broker-failure tolerance.
 
 ```powershell
 docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --describe --topic orders
 ```
 
-![Descripción del tópico orders: tres particiones y factor de replicación uno](docs/images/orders-topic-partitions.png)
+![orders topic details: three partitions and replication factor one](docs/images/orders-topic-partitions.png)
 
-Las particiones permiten repartir el trabajo y mantener orden dentro de cada partición. Para tener redundancia real se necesitarían varios brokers y un factor de replicación mayor a uno; eso no forma parte de esta prueba.
+Partitions distribute work and preserve ordering within a partition. Real redundancy would require multiple brokers and a replication factor greater than one; that is outside the scope of this exercise.
 
-## Misma clave, misma partición
+## Same key, same partition
 
-El producer usa `orderId` como la clave de Kafka:
+The producer uses `orderId` as the Kafka key:
 
 ```java
 kafkaTemplate.send(topic, event.orderId().toString(), event)
 ```
 
-Cuando se envían varios pedidos con el mismo `orderId`, todos llevan la misma clave. Kafka calcula siempre la misma partición para esa clave —mientras no cambie el número de particiones—, por lo que conserva el orden de esos eventos. En la prueba, el ID fijo `4b712433-3347-4411-ae2e-0e5c2822e284` se publicó repetidamente en la partición `1`.
+When several orders use the same `orderId`, they have the same key. Kafka calculates the same partition for that key—as long as the partition count does not change—so it preserves the order of those events. In the test, the fixed ID `4b712433-3347-4411-ae2e-0e5c2822e284` was repeatedly published to partition `1`.
 
-![Petición con orderId fijo](docs/images/request-fixed-order-id.png)
+![Request with a fixed orderId](docs/images/request-fixed-order-id.png)
 
-![El producer confirma que los mensajes con la misma clave llegaron a la partición 1](docs/images/producer-fixed-key-partition.png)
+![The producer confirms messages with the same key reached partition 1](docs/images/producer-fixed-key-partition.png)
 
-Si se omite `orderId` (como se ve comentado en la siguiente petición), el producer genera un UUID diferente para cada pedido. Al cambiar la clave, Kafka puede enviar el mensaje a otra partición; en la ejecución se observaron publicaciones en las particiones `1` y `2`. No significa que deba rotar de forma estricta: la partición exacta depende del hash de cada UUID.
+When `orderId` is omitted, as shown commented out in the next request, the producer generates a different UUID for each order. Because the key changes, Kafka can route the message to another partition; this run showed messages in partitions `1` and `2`. It does not have to rotate strictly: the exact partition depends on each UUID's hash.
 
-![Petición sin orderId: el producer genera uno nuevo](docs/images/request-generated-order-id.png)
+![Request without orderId: the producer generates one](docs/images/request-generated-order-id.png)
 
-![Con claves generadas se observan publicaciones en más de una partición](docs/images/producer-generated-key-partitions.png)
+![Generated keys result in messages across more than one partition](docs/images/producer-generated-key-partitions.png)
 
-## Ver mensajes y resultado del procesamiento
+## View messages and processing results
 
-Para leer todos los eventos guardados en el tópico principal:
+Read all events stored in the main topic:
 
 ```powershell
 docker exec -it kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic orders --from-beginning
 ```
 
-![Eventos almacenados en el tópico orders](docs/images/orders-topic-messages.png)
+![Events stored in the orders topic](docs/images/orders-topic-messages.png)
 
-Para comprobar además la partición, el offset y la clave con la que se guardó cada evento:
+To also see the partition, offset, and key of each event:
 
 ```powershell
 docker exec -it kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic orders --from-beginning --property print.partition=true --property print.offset=true --property print.key=true
 ```
 
-![Eventos de orders con partición, offset y clave](docs/images/orders-partition-key-offset.png)
+![orders events with partition, offset, and key](docs/images/orders-partition-key-offset.png)
 
-Un pedido válido recibe `202 Accepted` del producer, el producer imprime `Message sent to the partition: …` y el tracker registra que procesó el evento. El mensaje sigue almacenado en `orders` hasta que venza la política de retención de Kafka; consumirlo no lo elimina.
+A valid order receives `202 Accepted` from the producer. The producer prints `Message sent to the partition: …`, and the tracker logs that it processed the event. The message remains in `orders` until Kafka's retention policy expires; consuming it does not delete it.
 
-## Reintentos y Dead Letter Topic
+## Retries and Dead Letter Topic
 
-En este proyecto un pedido cuyo `itemName` es `sushi` falla a propósito. El tracker es el que detecta esa regla y lanza la excepción `Sushi orders are not supported`.
+In this project, an order whose `itemName` is `sushi` deliberately fails. The tracker detects that business rule and throws `Sushi orders are not supported`.
 
-`@RetryableTopic(attempts = "4")` da un total de cuatro intentos: el intento inicial y tres reintentos. Los reintentos se publican en tópicos separados, creados por Spring Kafka para no bloquear el consumo normal de `orders`:
+`@RetryableTopic(attempts = "4")` provides four total attempts: the initial attempt plus three retries. Spring Kafka publishes retries to separate topics so normal `orders` consumption is not blocked:
 
-| Intento | Tópico observado | Espera antes del siguiente intento |
+| Attempt | Observed topic | Delay before the next attempt |
 | --- | --- | --- |
-| 1 | `orders` | 1 segundo |
-| 2 | `orders-retry-1000` | 2 segundos |
-| 3 | `orders-retry-2000` | 4 segundos |
-| 4 | `orders-retry-4000` | Se envía al DLT si vuelve a fallar |
+| 1 | `orders` | 1 second |
+| 2 | `orders-retry-1000` | 2 seconds |
+| 3 | `orders-retry-2000` | 4 seconds |
+| 4 | `orders-retry-4000` | Sent to the DLT if it fails again |
 
-El diagrama usa nombres abreviados para representar estas tres colas; la tabla refleja los nombres observados en la ejecución, que incluyen el retraso en milisegundos.
+The diagram uses abbreviated names for the three retry queues; the table contains the names observed at runtime, which include the delay in milliseconds.
 
-Por eso se muestran cuatro logs de error para un pedido `sushi`: uno por cada intento de procesamiento. La captura muestra el recorrido de reintentos de 1, 2 y 4 segundos y la publicación final del evento fallido.
+This is why a `sushi` order produces four error logs: one for each processing attempt. The screenshot shows the 1-, 2-, and 4-second retry flow and the final publication of the failed event.
 
-![Logs del tracker durante los reintentos de un pedido sushi](docs/images/tracker-sushi-retries.png)
+![Tracker logs while retrying a sushi order](docs/images/tracker-sushi-retries.png)
 
-Al agotarse los intentos, Spring Kafka publica una copia del evento en `orders.dlt`. El tópico DLT conserva esos eventos según la política de retención de Kafka, para poder inspeccionarlos, corregir la causa y reprocesarlos de forma controlada. Se puede comprobar con:
+After all attempts are exhausted, Spring Kafka publishes a copy of the event to `orders.dlt`. The DLT keeps these events according to Kafka's retention policy so they can be inspected, fixed, and reprocessed in a controlled way. Verify it with:
 
 ```powershell
 docker exec -it kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic orders.dlt --from-beginning
 ```
 
-![Pedidos sushi guardados en orders.dlt](docs/images/orders-dlt-messages.png)
+![Sushi orders stored in orders.dlt](docs/images/orders-dlt-messages.png)
 
-Los tópicos de retry tampoco son una eliminación del mensaje original: son pasos adicionales del flujo. `orders` y los tópicos de retry/DLT retienen sus registros hasta que Kafka aplique su política de retención.
+Retry topics do not remove the original message; they are additional steps in the flow. `orders` and the retry/DLT topics keep their records until Kafka applies its retention policy.
 
-## ¿Por qué el DLT está en el consumer y no en el producer?
+## Why is the DLT in the consumer instead of the producer?
 
-Una Dead Letter Topic representa un evento que **ya llegó correctamente a Kafka**, pero que el consumidor no pudo procesar después de agotar los reintentos. Solo el tracker sabe si la lógica de negocio terminó bien; por ejemplo, es quien rechaza `sushi`.
+A Dead Letter Topic represents an event that **reached Kafka successfully**, but that a consumer could not process after exhausting retries. Only the tracker can determine whether the business logic succeeded; for example, it is the component that rejects `sushi`.
 
-El producer solo publica el evento. Si su `KafkaTemplate` falla, el problema es de publicación o conectividad y el mensaje posiblemente ni siquiera llegó a Kafka; no corresponde mandarlo al DLT de consumo. Para esos casos se deben aplicar reintentos de publicación, alertas o persistencia confiable del evento pendiente.
+The producer's responsibility is to publish the event. If its `KafkaTemplate` fails, the issue is publication or connectivity and the message may never have reached Kafka; sending it to a consumer DLT would be incorrect. Those cases require publication retries, alerts, or reliable storage for pending events.
 
-Además, el consumer puede enviar al DLT metadatos de diagnóstico como tópico, partición, offset y excepción. Por eso `@RetryableTopic` y `@DltHandler` están en `TrackerKafkaConsumer`.
+The consumer can also add diagnostic metadata to the DLT, including the topic, partition, offset, and exception. That is why `@RetryableTopic` and `@DltHandler` are in `TrackerKafkaConsumer`.
 
-## Oportunidad de mejora: Transactional Outbox
+## Improvement opportunity: Transactional Outbox
 
-Hoy el producer publica directamente en Kafka. Si más adelante también guarda el pedido en una base de datos, puede aparecer una inconsistencia: el pedido se guarda pero falla la publicación, o el evento se publica pero falla el guardado.
+The producer currently publishes directly to Kafka. If it later stores the order in a database too, an inconsistency can occur: the order is saved but event publishing fails, or the event is published but saving the order fails.
 
-El patrón **Transactional Outbox** lo evita:
+The **Transactional Outbox** pattern prevents this:
 
-1. En una misma transacción de base de datos se guardan el pedido y un registro `outbox` con el evento pendiente.
-2. Un proceso publicador lee los eventos pendientes y los envía a Kafka.
-3. Tras confirmarse la publicación, marca el registro como enviado.
+1. Store the order and a pending `outbox` event record in the same database transaction.
+2. Have a separate publisher read pending events and send them to Kafka.
+3. Mark the event record as sent only after publication succeeds.
 
-Así se garantiza una salida confiable de eventos. El consumer debe ser idempotente, porque el publicador puede reenviar un evento si falla justo después de publicarlo. El Outbox complementa al DLT: protege la publicación del producer; el DLT conserva fallos de procesamiento del consumer.
+This provides reliable event delivery. The consumer must remain idempotent, since the publisher can resend an event if it fails immediately after publishing. The Outbox complements the DLT: it protects producer publication, while the DLT retains consumer-processing failures.
 
-## Recursos
+## Resources
 
-- [Playlist de recursos sobre Kafka](https://www.youtube.com/playlist?list=PLRWubtXJnfRQ)
+- [Kafka resource playlist](https://www.youtube.com/playlist?list=PLRWubtXJnfRQ)
