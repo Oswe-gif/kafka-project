@@ -4,7 +4,7 @@ This Spring Boot and Kafka example has a **producer** that receives and publishe
 
 ## Architecture
 
-![Order, retry, and error-queue flow diagram](docs/architecture.svg)
+![Order, retry, and error-queue flow diagram](https://raw.githubusercontent.com/Oswe-gif/kafka-project/97b75ed/docs/architecture.svg)
 
 1. A client sends an order to the **producer** on port `8081` through `POST /api/messages`.
 2. The producer publishes an `OrderCreatedEvent` as JSON to the Kafka `orders` topic, using `orderId` as the message key.
