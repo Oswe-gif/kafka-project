@@ -19,10 +19,6 @@ public class ProducerService {
     }
 
     public void send(OrderCreatedEvent event) {
-        if (event.equals("pizza")) {
-            throw new RuntimeException("sorry man, something went wrong");
-        }
-
         kafkaTemplate.send(topic, event.orderId().toString(), event)
                 .whenComplete((result, error) -> {
                     if (error != null) {
