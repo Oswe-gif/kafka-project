@@ -142,6 +142,6 @@ The **Transactional Outbox** pattern prevents this:
 
 This provides reliable event delivery. The consumer must remain idempotent, since the publisher can resend an event if it fails immediately after publishing. The Outbox complements the DLT: it protects producer publication, while the DLT retains consumer-processing failures.
 
-## Resources
+## Theoretical concepts
 
 - [Kafka resource playlist](https://www.youtube.com/playlist?list=PLRWubtXJnfRQ)
